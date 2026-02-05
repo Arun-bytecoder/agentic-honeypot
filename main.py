@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Depends, BackgroundTasks
 from pydantic import BaseModel
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 from auth import verify_api_key
 from detector import is_scam
@@ -27,7 +27,7 @@ class HoneypotRequest(BaseModel):
     sessionId: str
     message: Message
     conversationHistory: List[dict] = []
-    metadata: dict | None = None
+    metadata: Optional[dict] = None
 
 # =========================
 # CONSTANTS
@@ -43,10 +43,12 @@ def honeypot(
     background_tasks: BackgroundTasks,
     _=Depends(verify_api_key)
 ):
+    # -------------------------
     # Initialize session
+    # -------------------------
     if data.sessionId not in sessions:
         sessions[data.sessionId] = {
-            "messages": [],
+            "totalMessages": 0,
             "scamDetected": False,
             "callbackSent": False,
             "intelligence": {
@@ -60,44 +62,51 @@ def honeypot(
 
     session = sessions[data.sessionId]
 
-    # Store incoming message
-    session["messages"].append({
-        "sender": data.message.sender,
-        "text": data.message.text
-    })
+    # -------------------------
+    # Engagement depth (SINGLE SOURCE OF TRUTH)
+    # -------------------------
+    session["totalMessages"] += 1
 
+    # -------------------------
     # Scam detection
+    # -------------------------
     if data.message.sender.lower() == "scammer" or is_scam(data.message.text):
         session["scamDetected"] = True
 
-
-
-    # Extract intelligence (internal)
+    # -------------------------
+    # Intelligence extraction
+    # -------------------------
     intel = extract_intelligence(data.message.text)
     for key in session["intelligence"]:
         for value in intel.get(key, []):
             if value not in session["intelligence"][key]:
                 session["intelligence"][key].append(value)
 
-    # Generate agent reply
+    # -------------------------
+    # Agent reply
+    # -------------------------
     reply = generate_agent_reply(data.conversationHistory)
 
-    # Trigger GUVI callback safely (background)
+    # -------------------------
+    # GUVI callback (NON-BLOCKING, SAFE)
+    # -------------------------
     if (
         session["scamDetected"]
-        and len(session["messages"]) >= MIN_MESSAGES_FOR_CALLBACK
+        and session["totalMessages"] >= MIN_MESSAGES_FOR_CALLBACK
         and not session["callbackSent"]
     ):
         background_tasks.add_task(
             send_guvi_callback,
             data.sessionId,
             session["scamDetected"],
-            session["messages"],
+            session["totalMessages"],   # ✅ CORRECT
             session["intelligence"]
         )
         session["callbackSent"] = True
 
-    # IMPORTANT: respond immediately
+    # -------------------------
+    # Immediate response
+    # -------------------------
     return {
         "status": "success",
         "reply": reply
